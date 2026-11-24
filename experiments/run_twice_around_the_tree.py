@@ -101,7 +101,7 @@ def medir_instancia(tat, matriz: np.ndarray, repeticoes: int) -> Dict[str, Any]:
     tempos_ms = {k: statistics.median(v) for k, v in amostras_ms.items()}
 
     # --- Passada 2: MEMORIA (com tracemalloc, cada subrotina isolada) ---
-    filhos, mem_mst = pico_memoria_kb(tat.mst_scipy, matriz, 0)
+    filhos, mem_mst = pico_memoria_kb(tat.mst_prim, matriz, 0)
     ordem, mem_pre = pico_memoria_kb(tat.preordem, filhos, 0)
     _, mem_custo = pico_memoria_kb(tat.custo_ciclo, ordem + [0], matriz)
     _, mem_total = pico_memoria_kb(tat.twice_around_the_tree, matriz)

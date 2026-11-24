@@ -5,33 +5,37 @@ import time
 from typing import Any, Callable, List, Sequence, Tuple, Union
 
 import numpy as np
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import breadth_first_order, minimum_spanning_tree
 
 
-def mst_scipy(matriz: np.ndarray, raiz: int = 0) -> list[list[int]]:
+def mst_prim(matriz: np.ndarray, raiz: int = 0) -> list[list[int]]:
     """Retorna a MST como lista de adjacência: filhos[v] = lista de filhos de v.
 
-    Usa scipy.sparse.csgraph.minimum_spanning_tree (Kruskal sobre o grafo completo,
-    O(N^2 log N) para N vértices). Cuidado: em matriz densa o SciPy trata peso 0
-    como "sem aresta"; pontos duplicados (distância 0) desconectariam o grafo.
-    Por isso trocamos zeros fora da diagonal por um epsilon (1e-9), que não altera
-    o peso da MST de forma relevante.
+    Algoritmo de Prim sobre o grafo completo (matriz densa), O(N^2) tempo e O(N)
+    memória extra: a árvore cresce a partir de `raiz`, e a cada passo entra o
+    vértice fora da árvore com menor `chave` (menor aresta que o liga à árvore).
+    Como a árvore já nasce enraizada, `pai[v]` dá direto a lista de filhos.
+    Pesos 0 (pontos duplicados) não precisam de tratamento especial aqui.
     """
     n = matriz.shape[0]
     filhos: list[list[int]] = [[] for _ in range(n)]
     if n <= 1:
         return filhos
 
-    pesos = matriz.astype(np.float64)
-    pesos[pesos == 0] = 1e-9
-    np.fill_diagonal(pesos, 0.0)
+    pesos = np.asarray(matriz)
+    chave = pesos[raiz].copy()              # menor peso conhecido até cada vértice
+    pai = np.full(n, raiz, dtype=np.int64)  # vértice da árvore que atinge v com `chave[v]`
+    fora = np.ones(n, dtype=bool)           # True enquanto v ainda não está na árvore
+    fora[raiz] = False
 
-    mst = minimum_spanning_tree(csr_matrix(pesos))
-    # A MST sai como grafo dirigido arbitrário; enraizamos em `raiz` via BFS não dirigido.
-    ordem, pai = breadth_first_order(mst, raiz, directed=False, return_predecessors=True)
-    for v in ordem[1:]:
-        filhos[int(pai[v])].append(int(v))
+    for _ in range(n - 1):
+        candidatos = np.where(fora, chave, np.inf)
+        u = int(np.argmin(candidatos))
+        fora[u] = False
+        filhos[int(pai[u])].append(u)
+
+        melhora = fora & (pesos[u] < chave)
+        chave[melhora] = pesos[u][melhora]
+        pai[melhora] = u
     return filhos
 
 
@@ -91,7 +95,7 @@ def twice_around_the_tree(matriz: np.ndarray, raiz: int = 0) -> dict:
     matriz = np.asarray(matriz)
     tempos: dict[str, float] = {}
 
-    filhos, tempos["mst"] = medir_subrotina(mst_scipy, matriz, raiz)
+    filhos, tempos["mst"] = medir_subrotina(mst_prim, matriz, raiz)
     ordem, tempos["preordem"] = medir_subrotina(preordem, filhos, raiz)
     ciclo = ordem + [raiz]
     custo, tempos["custo"] = medir_subrotina(custo_ciclo, ciclo, matriz)
