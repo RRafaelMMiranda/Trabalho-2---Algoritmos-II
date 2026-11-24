@@ -29,6 +29,7 @@ ESTRATEGIAS_PADRAO = [
     "cold_start",
     "nearest_neighbor",
     "convex_hull",
+    "twice_around_the_tree",
     "christofides",
 ]
 
@@ -96,7 +97,7 @@ def carregar_ja_executados(caminho_csv: Path) -> Set[Tuple[str, str]]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Bateria de experimentos do Branch-and-Bound com os 4 warm-starts atuais."
+        description="Bateria de experimentos do Branch-and-Bound com os 5 warm-starts."
     )
     parser.add_argument(
         "--instancias",
@@ -109,7 +110,7 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         choices=ESTRATEGIAS_PADRAO,
         default=ESTRATEGIAS_PADRAO,
-        help="Estrategias de warm-start a executar. Padrao: todas as 4.",
+        help="Estrategias de warm-start a executar. Padrao: todas as 5.",
     )
     parser.add_argument(
         "--time-limit",
