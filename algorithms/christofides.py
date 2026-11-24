@@ -1,149 +1,281 @@
 from __future__ import annotations
 
+import gc
+import math
 import time
 import tracemalloc
-from typing import List, Sequence, Tuple, Union, Dict, Any
+from dataclasses import asdict, dataclass
+from typing import Any, Callable, Dict, List, Sequence, Tuple, Union
+
 import networkx as nx
 import numpy as np
 
-# Importa as utilidades que o warm_start usa
-# ajustar o caminho...
-from utilities.warm_start import normalizar_rota, calcular_custo_rota, para_lista_distancias
+from utilities.warm_start import normalizar_rota, para_lista_distancias
 
-def christofides_solver(
-    dist: List[List[int]],
-    coletar_metricas: bool = False
-) -> Tuple[int, List[int], Dict[str, Any]]:
+# ============================================================================
+# DATACLASSES PARA AUDITORIA E DATASET DE EXPERIMENTOS
+# ============================================================================
+
+@dataclass
+class MetricasSubrotina:
+    tempo_ms: float
+    memoria_pico_kb: float
+    memoria_alocada_kb: float
+
+@dataclass
+class ResultadoChristofides:
+    custo: int
+    tour: List[int]
+    n: int
+    qtd_vertices_impares: int
+    mst: MetricasSubrotina
+    matching: MetricasSubrotina
+    euleriano: MetricasSubrotina
+    shortcutting: MetricasSubrotina
+    tempo_total_ms: float
+    memoria_pico_total_kb: float
+
+    def para_dict(self) -> Dict[str, Any]:
+        """Converte para dicionario achatado, pronto para exportar para DataFrame/CSV."""
+        return {
+            "n": self.n,
+            "custo": self.custo,
+            "qtd_vertices_impares": self.qtd_vertices_impares,
+            # Gargalo 1: MST
+            "tempo_mst_ms": self.mst.tempo_ms,
+            "mem_pico_mst_kb": self.mst.memoria_pico_kb,
+            # Gargalo 2: Matching
+            "tempo_matching_ms": self.matching.tempo_ms,
+            "mem_pico_matching_kb": self.matching.memoria_pico_kb,
+            # Sub-rotinas auxiliares
+            "tempo_euleriano_ms": self.euleriano.tempo_ms,
+            "mem_pico_euleriano_kb": self.euleriano.memoria_pico_kb,
+            "tempo_shortcutting_ms": self.shortcutting.tempo_ms,
+            "mem_pico_shortcutting_kb": self.shortcutting.memoria_pico_kb,
+            # Totais
+            "tempo_total_ms": self.tempo_total_ms,
+            "mem_pico_total_kb": self.memoria_pico_total_kb,
+        }
+
+# ============================================================================
+# HARNESS DE PROFILING CONTROLADO DE SUB-ROTINAS
+# ============================================================================
+
+def perf_subrotina(func: Callable, *args, **kwargs) -> Tuple[Any, MetricasSubrotina]:
     """
-    Executa o algoritmo de aproximacao de Christofides (garantia 1.5).
-    Instrumentado para medir tempo e memoria de cada subrotina.
+    Executa uma sub-rotina isolando o impacto do Garbage Collector e
+    medindo tempo de CPU/relógio de alta resolução e pico real de memória.
+    """
+    gc.collect()  # Elimina lixo prévio para não falsear a medição de memória
+    tracemalloc.start()
+    t_inicio = time.perf_counter()
+
+    resultado = func(*args, **kwargs)
+
+    t_fim = time.perf_counter()
+    mem_atual, mem_pico = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    metricas = MetricasSubrotina(
+        tempo_ms=(t_fim - t_inicio) * 1000.0,
+        memoria_pico_kb=mem_pico / 1024.0,
+        memoria_alocada_kb=mem_atual / 1024.0,
+    )
+    return resultado, metricas
+
+# ============================================================================
+# SUB-ROTINAS DO ALGORITMO (PURAS E AUDITÁVEIS)
+# ============================================================================
+
+def subrotina_mst_prim(dist: List[List[int]]) -> List[Tuple[int, int]]:
+    """
+    GARGALO 1: Árvore Geradora Mínima (MST).
+    Implementação nativa de Prim para grafos completos em O(N^2).
+    Evita a criação de objetos pesados de grafo para N <= 75.
     """
     n = len(dist)
-    if n <= 2:
-        tour = list(range(n)) + [0]
-        return calcular_custo_rota(tour, dist), normalizar_rota(tour, n), {}
+    if n <= 1:
+        return []
 
-    metricas: Dict[str, Any] = {
-        'n': n,
-        'tempo_mst': 0.0,
-        'mem_mst_kb': 0.0,
-        'tempo_impares': 0.0,
-        'num_impares': 0,
-        'tempo_matching': 0.0,
-        'mem_matching_kb': 0.0,
-        'tempo_euleriano': 0.0,
-        'tempo_atalhos': 0.0,
-        'tempo_total': 0.0,
-    }
+    in_mst = [False] * n
+    min_cost = [math.inf] * n
+    parent = [-1] * n
 
-    t_inicio_total = time.perf_counter()
+    min_cost[0] = 0
+    mst_edges: List[Tuple[int, int]] = []
 
-    # -------------------------------------------------------------
-    # 1. Arvore Geradora Minima (MST) - O(N^2)
-    # -------------------------------------------------------------
-    if coletar_metricas:
-        tracemalloc.start()
-    t0 = time.perf_counter()
+    for _ in range(n):
+        u = -1
+        menor = math.inf
+        for i in range(n):
+            if not in_mst[i] and min_cost[i] < menor:
+                menor = min_cost[i]
+                u = i
 
-    G = nx.Graph()
-    for i in range(n):
-        row_i = dist[i]
-        for j in range(i + 1, n):
-            G.add_edge(i, j, weight=row_i[j])
-    
-    mst = nx.minimum_spanning_tree(G, algorithm='prim')
+        if u == -1:
+            break
 
-    metricas['tempo_mst'] = time.perf_counter() - t0
-    if coletar_metricas:
-        _, pico = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-        metricas['mem_mst_kb'] = pico / 1024.0
+        in_mst[u] = True
+        if parent[u] != -1:
+            mst_edges.append((parent[u], u))
 
-    # -------------------------------------------------------------
-    # 2. Identificar vertices de grau impar na MST
-    # -------------------------------------------------------------
-    t0 = time.perf_counter()
-    vertices_impares = [v for v, grau in mst.degree() if grau % 2 != 0]
-    metricas['tempo_impares'] = time.perf_counter() - t0
-    metricas['num_impares'] = len(vertices_impares)
+        row_u = dist[u]
+        for v in range(n):
+            if not in_mst[v] and row_u[v] < min_cost[v]:
+                min_cost[v] = row_u[v]
+                parent[v] = u
 
-    # -------------------------------------------------------------
-    # 3. Minimum-Weight Perfect Matching (MWPM) - Gargalo O(|O|^3)
-    # -------------------------------------------------------------
-    if coletar_metricas:
-        tracemalloc.start()
-    t0 = time.perf_counter()
+    return mst_edges
+
+def subrotina_vertices_impares(mst_edges: Sequence[Tuple[int, int]], n: int) -> List[int]:
+    """Identifica os vértices com grau ímpar em O(N)."""
+    graus = [0] * n
+    for u, v in mst_edges:
+        graus[u] += 1
+        graus[v] += 1
+    return [v for v in range(n) if graus[v] % 2 != 0]
+
+def subrotina_matching_blossom(
+    impares: Sequence[int],
+    dist: List[List[int]]
+) -> List[Tuple[int, int]]:
+    """
+    GARGALO 2: Emparelhamento Perfeito de Peso Mínimo (MWPM).
+    Usa NetworkX estritamente como suporte do algoritmo das Flores (Blossom) em O(|O|^3).
+    Apenas o subgrafo induzido pelos vértices ímpares é instanciado.
+    """
+    if not impares:
+        return []
 
     subgrafo = nx.Graph()
-    qtd_impares = len(vertices_impares)
-    for i in range(qtd_impares):
-        u = vertices_impares[i]
+    m = len(impares)
+
+    for i in range(m):
+        u = impares[i]
         row_u = dist[u]
-        for j in range(i + 1, qtd_impares):
-            v = vertices_impares[j]
+        for j in range(i + 1, m):
+            v = impares[j]
             subgrafo.add_edge(u, v, weight=row_u[v])
 
-    # Algoritmo de Blossom (Edmonds)
-    matching = nx.min_weight_matching(subgrafo, maxcardinality=True)
+    matching = nx.min_weight_matching(subgrafo, weight="weight")
+    return list(matching)
 
-    metricas['tempo_matching'] = time.perf_counter() - t0
-    if coletar_metricas:
-        _, pico = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-        metricas['mem_matching_kb'] = pico / 1024.0
+def subrotina_circuito_euleriano(
+    arestas: Sequence[Tuple[int, int]],
+    n: int,
+    start: int = 0
+) -> List[int]:
+    """
+    Circuito Euleriano via Algoritmo de Hierholzer em O(|V| + |E|).
+    Usa IDs de arestas para evitar remoções lentas em multígrafos.
+    """
+    num_arestas = len(arestas)
+    if num_arestas == 0:
+        return [start]
 
-    # -------------------------------------------------------------
-    # 4. Multigrafo e Circuito Euleriano
-    # -------------------------------------------------------------
-    t0 = time.perf_counter()
+    adj: List[List[Tuple[int, int]]] = [[] for _ in range(n)]
+    for edge_id, (u, v) in enumerate(arestas):
+        adj[u].append((v, edge_id))
+        adj[v].append((u, edge_id))
 
-    multigrafo = nx.MultiGraph()
-    multigrafo.add_edges_from(mst.edges(data=True))
-    for u, v in matching:
-        multigrafo.add_edge(u, v, weight=dist[u][v])
+    usada = [False] * num_arestas
+    pilha = [start]
+    circuito: List[int] = []
 
-    circuito_euleriano = list(nx.eulerian_circuit(multigrafo, source=0))
-    metricas['tempo_euleriano'] = time.perf_counter() - t0
+    while pilha:
+        u = pilha[-1]
+        while adj[u] and usada[adj[u][-1][1]]:
+            adj[u].pop()
 
-    # -------------------------------------------------------------
-    # 5. Atalhos (Shortcutting) para formar ciclo Hamiltoniano
-    # -------------------------------------------------------------
-    t0 = time.perf_counter()
+        if adj[u]:
+            v, edge_id = adj[u].pop()
+            usada[edge_id] = True
+            pilha.append(v)
+        else:
+            circuito.append(pilha.pop())
 
-    visitados = set()
-    tour_bruto = []
-    for u, _ in circuito_euleriano:
-        if u not in visitados:
-            tour_bruto.append(u)
-            visitados.add(u)
+    return circuito[::-1]
 
-    # Se por desconexao algum vertice isolado ficou de fora (seguranca)
-    if len(visitados) < n:
-        for v in range(n):
-            if v not in visitados:
-                tour_bruto.append(v)
-                visitados.add(v)
+def subrotina_shortcutting(circuito: Sequence[int], n: int) -> List[int]:
+    """Constroi o ciclo Hamiltoniano a partir do circuito Euleriano."""
+    visitados = [False] * n
+    tour: List[int] = []
 
-    tour_final = normalizar_rota(tour_bruto, n)
-    metricas['tempo_atalhos'] = time.perf_counter() - t0
+    for v in circuito:
+        if not visitados[v]:
+            visitados[v] = True
+            tour.append(v)
 
-    # Consolidacao final
-    metricas['tempo_total'] = time.perf_counter() - t_inicio_total
-    custo = calcular_custo_rota(tour_final, dist)
-    metricas['custo_tour'] = custo
+    tour.append(tour[0])
+    return normalizar_rota(tour, n)
 
-    return custo, tour_final, metricas
+# ============================================================================
+# EXECUÇÃO PRINCIPAL
+# ============================================================================
 
-# =====================================================================
-# FUNCAO PADRAO DE WARM-START (para o seu colega importar no B&B)
-# =====================================================================
+def executar_christofides_com_auditoria(
+    matriz_distancias: Union[np.ndarray, Sequence[Sequence[int]]]
+) -> ResultadoChristofides:
+    """
+    Executa o Christofides auditando individualmente cada sub-rotina crítica.
+    Retorna o objeto com a rota e todos os dados estatísticos para regressão.
+    """
+    dist = para_lista_distancias(matriz_distancias)
+    n = len(dist)
+
+    gc.collect()
+    tracemalloc.start()
+    t_global_inicio = time.perf_counter()
+
+    # --- 1. PROFILING DA MST (Gargalo 1) ---
+    mst_edges, metrica_mst = perf_subrotina(subrotina_mst_prim, dist)
+
+    # Identificação de ímpares
+    impares = subrotina_vertices_impares(mst_edges, n)
+
+    # --- 2. PROFILING DO MATCHING (Gargalo 2) ---
+    matching_edges, metrica_matching = perf_subrotina(
+        subrotina_matching_blossom, impares, dist
+    )
+
+    # Multígrafo H = T U M
+    multigrafo_arestas = mst_edges + matching_edges
+
+    # --- 3. PROFILING DO CIRCUITO EULERIANO ---
+    circuito, metrica_euleriano = perf_subrotina(
+        subrotina_circuito_euleriano, multigrafo_arestas, n, 0
+    )
+
+    # --- 4. PROFILING DO SHORTCUTTING ---
+    tour_normalizado, metrica_shortcutting = perf_subrotina(
+        subrotina_shortcutting, circuito, n
+    )
+
+    t_global_fim = time.perf_counter()
+    _, mem_pico_global = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    custo = sum(dist[tour_normalizado[i]][tour_normalizado[i + 1]] for i in range(n))
+
+    return ResultadoChristofides(
+        custo=custo,
+        tour=tour_normalizado,
+        n=n,
+        qtd_vertices_impares=len(impares),
+        mst=metrica_mst,
+        matching=metrica_matching,
+        euleriano=metrica_euleriano,
+        shortcutting=metrica_shortcutting,
+        tempo_total_ms=(t_global_fim - t_global_inicio) * 1000.0,
+        memoria_pico_total_kb=mem_pico_global / 1024.0,
+    )
+
 def warm_start_christofides(
     matriz_distancias: Union[np.ndarray, Sequence[Sequence[int]]]
 ) -> Tuple[int, List[int]]:
     """
-    5. Christofides: Usa a solucao aproximada de Christofides como limite inicial.
-    Retorna (custo, rota_normalizada).
+    Interface padronizada para warm-start no Branch-and-Bound:
+    Retorna apenas (custo, rota_normalizada).
     """
-    dist = para_lista_distancias(matriz_distancias)
-    custo, rota, _ = christofides_solver(dist, coletar_metricas=False)
-    return custo, rota
+    resultado = executar_christofides_com_auditoria(matriz_distancias)
+    return resultado.custo, resultado.tour
