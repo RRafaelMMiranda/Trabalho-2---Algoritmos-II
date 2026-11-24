@@ -60,6 +60,28 @@ class BranchAndBoundResult:
         return row
 
 
+def _carregar_twice_around_the_tree():
+    """O arquivo tem hifens no nome (nao importavel com `import`), entao carregamos via importlib."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    nome = "twice_around_the_tree"
+    if nome in sys.modules:
+        return sys.modules[nome]
+    caminho = Path(__file__).resolve().parent / "twice-around-the-tree.py"
+    spec = importlib.util.spec_from_file_location(nome, caminho)
+    modulo = importlib.util.module_from_spec(spec)
+    sys.modules[nome] = modulo
+    spec.loader.exec_module(modulo)
+    return modulo
+
+
+# Carregado na importacao (fora do cronometro do warm-start), para o tempo medido
+# da estrategia nao incluir o custo de importar o SciPy.
+_TAT = _carregar_twice_around_the_tree()
+
+
 def _executar_warm_start(
     dist: List[List[int]],
     vertices: Optional[Sequence[Node]],
@@ -96,9 +118,12 @@ def _executar_warm_start(
 
         custo, tour = warm_start_christofides(dist)
         return int(custo), normalizar_rota(tour, n), "christofides"
+    if ws in ("twice_around_the_tree", "twice-around-the-tree", "tat", "dobro_da_arvore"):
+        custo, tour = _TAT.warm_start_twice_around_the_tree(dist)
+        return int(custo), normalizar_rota(tour, n), "twice_around_the_tree"
     raise ValueError(
         f"Warm-start desconhecido: '{warm_start}'. Use 'cold_start', 'nearest_neighbor', "
-        "'convex_hull', 'christofides', ou passe `initial_tour`/`warm_start_fn`."
+        "'convex_hull', 'twice_around_the_tree', 'christofides', ou passe `initial_tour`/`warm_start_fn`."
     )
 
 
