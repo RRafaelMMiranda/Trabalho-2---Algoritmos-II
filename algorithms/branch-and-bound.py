@@ -91,9 +91,14 @@ def _executar_warm_start(
             raise ValueError("A estrategia 'convex_hull' exige o parametro `vertices`.")
         custo, tour = warm_start_convex_hull(dist, vertices)
         return custo, tour, "convex_hull"
+    if ws in ("christofides", "cristofides"):
+        from algorithms.christofides import warm_start_christofides
+
+        custo, tour = warm_start_christofides(dist)
+        return int(custo), normalizar_rota(tour, n), "christofides"
     raise ValueError(
         f"Warm-start desconhecido: '{warm_start}'. Use 'cold_start', 'nearest_neighbor', "
-        "'convex_hull', ou passe `initial_tour`/`warm_start_fn`."
+        "'convex_hull', 'christofides', ou passe `initial_tour`/`warm_start_fn`."
     )
 
 
@@ -105,17 +110,25 @@ def branch_and_bound_tsp(
     initial_upper_bound: Optional[int] = None,
     warm_start_fn: Optional[Callable[[List[List[int]]], Tuple[int, List[int]]]] = None,
     time_limit: Optional[float] = 1800.0,
-    track_memory: bool = True,
+    break_symmetry: bool = True,
+    use_mst_cache: bool = True,
+    max_mst_cache_size: int = 65536,
+    track_memory: bool = False,
 ) -> BranchAndBoundResult:
     """
     Branch-and-Bound exato para o TSP Simetrico (DFS por extensao de caminho + LB via MST).
 
-    - Estrategia de busca: Depth-First Search (DFS) visitando vizinhos em ordem
-      crescente de distancia. Usa memoria O(N) fixa (sem copias de matrizes).
-    - Lower Bound admissivel: para um caminho parcial (0 -> ... -> curr) de custo g
+    - Busca: DFS com backtracking in-place (sem copias de matrizes) e vizinhos
+      visitados em ordem crescente de distancia.
+    - Lower Bound admissivel: para caminho parcial (0 -> ... -> curr) de custo g
       e conjunto de vertices nao visitados U:
           LB = g + MST(U) + min_{u in U} d(curr, u) + min_{u in U} d(u, 0)
       (na raiz, onde curr == 0, usa as duas menores arestas distintas saindo de 0).
+    - Otimizacoes enxutas:
+      1) Quebra de simetria de reversao (path[1] < path[n-1]) em O(1) via bitmask;
+      2) Cache limitado de MST(U) por bitmask (evita recalcular Prim em subproblemas repetidos);
+      3) Prim com swap-remove sobre buffers pre-alocados e aborto antecipado;
+      4) `track_memory=False` por padrao para nao contaminar medicoes de tempo.
     """
     ja_rastreando = tracemalloc.is_tracing()
     if track_memory and not ja_rastreando:
@@ -155,17 +168,26 @@ def branch_and_bound_tsp(
         for u in range(n)
     ]
 
-    # Estado unico mutavel (memoria O(N), zero copias de matrizes)
+    # Rank por proximidade a origem (alinha a quebra de simetria com a ordem gulosa da DFS)
+    ordem_origem = vizinhos_ordenados[0]
+    rank_origem = [0] * n
+    bit_vertice = [0] * n
+    for r, v in enumerate(ordem_origem):
+        rank_origem[v] = r
+        bit_vertice[v] = 1 << r
+
+    # Estado unico mutavel (zero copias de matrizes)
     best_cost: float = initial_ub
     best_tour: List[int] = list(initial_tour_norm)
     visited = [False] * n
     visited[0] = True
     path = [0] * n
 
-    # Buffers pre-alocados para Prim (evita realocacoes e pressao no GC)
-    in_mst = [False] * n
-    min_edge = [0] * n
+    # Buffers pre-alocados para o Prim com swap-remove + cache limitado de MST(U)
     unvisited_buf = [0] * n
+    ativos = [0] * n
+    chaves = [0] * n
+    mst_cache: Dict[int, int] = {}
 
     nodes_expanded = 0
     nodes_pruned = 0
@@ -173,7 +195,7 @@ def branch_and_bound_tsp(
     timed_out = False
     tempo_lb = 0.0
 
-    def lower_bound_mst(curr: int, g: int) -> int:
+    def lower_bound_mst(curr: int, g: int, mask: int) -> int:
         nonlocal tempo_lb
         t0 = time.perf_counter()
 
@@ -196,7 +218,6 @@ def branch_and_bound_tsp(
         row_curr = dist[curr]
         row_0 = dist[0]
         if curr == 0:
-            # Na raiz, primeira e ultima arestas precisam ir para vertices distintos
             m1 = m2 = 10**18
             for idx in range(k):
                 d = row_0[unvisited_buf[idx]]
@@ -219,51 +240,66 @@ def branch_and_bound_tsp(
             conn = min_from_curr + min_to_0
 
         # Corte rapido O(k) antes de rodar Prim O(k^2)
-        if g + conn >= best_cost:
+        base_lb = g + conn
+        if base_lb >= best_cost:
             tempo_lb += time.perf_counter() - t0
-            return g + conn
+            return base_lb
 
-        # MST sobre U usando Prim O(k^2) sem alocacoes dinamicas
-        start_u = unvisited_buf[0]
-        row_start = dist[start_u]
-        in_mst[start_u] = True
-        for idx in range(1, k):
-            u = unvisited_buf[idx]
-            in_mst[u] = False
-            min_edge[u] = row_start[u]
+        # Consulta cache limitado de MST(U) pela bitmask dos nao visitados
+        orcamento = best_cost - base_lb
+        if use_mst_cache and mask in mst_cache:
+            mst_cost = mst_cache[mask]
+        else:
+            # Prim denso O(k^2) com swap-remove e aborto antecipado
+            m = k - 1
+            row_start = dist[unvisited_buf[0]]
+            for idx in range(m):
+                u = unvisited_buf[idx + 1]
+                ativos[idx] = u
+                chaves[idx] = row_start[u]
 
-        mst_cost = 0
-        for _ in range(k - 1):
-            best_u = -1
-            best_d = 10**18
-            for idx in range(1, k):
-                u = unvisited_buf[idx]
-                if not in_mst[u] and min_edge[u] < best_d:
-                    best_d = min_edge[u]
-                    best_u = u
-            in_mst[best_u] = True
-            mst_cost += best_d
-            if g + conn + mst_cost >= best_cost:
-                tempo_lb += time.perf_counter() - t0
-                return g + conn + mst_cost
+            mst_cost = 0
+            aborted = False
+            while m > 0:
+                best_i = 0
+                best_d = chaves[0]
+                for idx in range(1, m):
+                    d = chaves[idx]
+                    if d < best_d:
+                        best_d = d
+                        best_i = idx
 
-            row_bu = dist[best_u]
-            for idx in range(1, k):
-                u = unvisited_buf[idx]
-                if not in_mst[u]:
-                    d = row_bu[u]
-                    if d < min_edge[u]:
-                        min_edge[u] = d
+                mst_cost += best_d
+                if mst_cost >= orcamento:
+                    aborted = True
+                    break
+
+                u = ativos[best_i]
+                m -= 1
+                ativos[best_i] = ativos[m]
+                chaves[best_i] = chaves[m]
+
+                row_u = dist[u]
+                for idx in range(m):
+                    d = row_u[ativos[idx]]
+                    if d < chaves[idx]:
+                        chaves[idx] = d
+
+            # Armazena no cache somente custos exatos (nao abortados)
+            if not aborted and use_mst_cache and max_mst_cache_size > 0:
+                if len(mst_cache) >= max_mst_cache_size:
+                    mst_cache.clear()
+                mst_cache[mask] = mst_cost
 
         tempo_lb += time.perf_counter() - t0
-        return g + conn + mst_cost
+        return base_lb + mst_cost
 
-    def dfs(curr: int, depth: int, g: int) -> None:
+    def dfs(curr: int, depth: int, g: int, mask: int) -> None:
         nonlocal best_cost, best_tour, nodes_expanded, nodes_pruned, max_depth, timed_out
 
         if timed_out:
             return
-        if deadline is not None and (nodes_expanded & 255) == 0 and time.perf_counter() >= deadline:
+        if deadline is not None and (nodes_expanded & 4095) == 0 and time.perf_counter() >= deadline:
             timed_out = True
             return
 
@@ -271,18 +307,16 @@ def branch_and_bound_tsp(
             max_depth = depth
 
         if depth == n - 1:
-            # Ultimo vertice: fecha o ciclo de volta a 0
-            for v in vizinhos_ordenados[curr]:
-                if not visited[v]:
-                    total = g + dist[curr][v] + dist[v][0]
-                    nodes_expanded += 1
-                    if total < best_cost:
-                        best_cost = total
-                        path[depth] = v
-                        best_tour = path + [0]
-                    else:
-                        nodes_pruned += 1
-                    return
+            # Ultimo vertice direto via bitmask em O(1)
+            ultimo = ordem_origem[mask.bit_length() - 1]
+            total = g + dist[curr][ultimo] + dist[ultimo][0]
+            nodes_expanded += 1
+            if total < best_cost:
+                best_cost = total
+                path[depth] = ultimo
+                best_tour = path + [0]
+            else:
+                nodes_pruned += 1
             return
 
         nodes_expanded += 1
@@ -291,6 +325,17 @@ def branch_and_bound_tsp(
         for nxt in vizinhos_ordenados[curr]:
             if visited[nxt]:
                 continue
+
+            new_mask = mask ^ bit_vertice[nxt]
+
+            # Quebra de simetria (rank_origem[path[1]] < rank_origem[path[n-1]]) em O(1):
+            # preserva a orientacao cujo primeiro passo saindo de 0 e mais curto
+            if break_symmetry:
+                rank_v1 = rank_origem[nxt] if depth == 1 else rank_origem[path[1]]
+                if (new_mask.bit_length() - 1) <= rank_v1:
+                    nodes_pruned += 1
+                    continue
+
             novo_g = g + row_curr[nxt]
             if novo_g >= best_cost:
                 nodes_pruned += 1
@@ -299,11 +344,11 @@ def branch_and_bound_tsp(
             visited[nxt] = True
             path[depth] = nxt
 
-            lb = lower_bound_mst(nxt, novo_g)
+            lb = lower_bound_mst(nxt, novo_g, new_mask)
             if lb >= best_cost:
                 nodes_pruned += 1
             else:
-                dfs(nxt, depth + 1, novo_g)
+                dfs(nxt, depth + 1, novo_g, new_mask)
 
             visited[nxt] = False
             if timed_out:
@@ -311,11 +356,12 @@ def branch_and_bound_tsp(
 
     # 2. Busca Branch-and-Bound
     t_busca = time.perf_counter()
-    root_lb = lower_bound_mst(0, 0)
+    mask_inicial = (1 << (n - 1)) - 1  # bits 0..n-2 ligados (um por vertice em ordem_origem)
+    root_lb = lower_bound_mst(0, 0, mask_inicial)
     if root_lb >= best_cost:
         nodes_pruned += 1
     else:
-        dfs(0, 1, 0)
+        dfs(0, 1, 0, mask_inicial)
     agora = time.perf_counter()
 
     peak_mem = 0

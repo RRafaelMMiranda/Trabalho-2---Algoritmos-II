@@ -83,8 +83,8 @@ def christofides_solver(
             v = vertices_impares[j]
             subgrafo.add_edge(u, v, weight=row_u[v])
 
-    # Algoritmo de Blossom (Edmonds)
-    matching = nx.min_weight_matching(subgrafo, maxcardinality=True)
+    # Algoritmo de Blossom (Edmonds) - em NetworkX 3.x, min_weight_matching ja garante cardinalidade maxima
+    matching = nx.min_weight_matching(subgrafo, weight='weight')
 
     metricas['tempo_matching'] = time.perf_counter() - t0
     if coletar_metricas:
