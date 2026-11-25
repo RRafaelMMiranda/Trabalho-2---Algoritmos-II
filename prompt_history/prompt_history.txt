@@ -1,0 +1,212 @@
+================================================================================
+HISTÓRICO DE PROMPTS E RESPOSTAS - TRABALHO PRÁTICO 2 (DCC207 - ALGORITMOS II)
+Branch-and-Bound (DFS + MST) e Heurísticas de Warm-Start
+================================================================================
+
+--------------------------------------------------------------------------------
+INTERAÇÃO 1 - USUÁRIO
+Anexos: tp2 - orientações.pdf
+Referências mencionadas: algorithms/, entities/, README.md, requirements.txt, utilities/
+--------------------------------------------------------------------------------
+basicamente preciso implementar o algoritmo de branch and bound, @[/Users/victorkaizer/Downloads/Trabalho-2---Algoritmos-II-main/algorithms] @[/Users/victorkaizer/Downloads/Trabalho-2---Algoritmos-II-main/entities] @[/Users/victorkaizer/Downloads/Trabalho-2---Algoritmos-II-main/README.md] @[/Users/victorkaizer/Downloads/Trabalho-2---Algoritmos-II-main/requirements.txt] @[/Users/victorkaizer/Downloads/Trabalho-2---Algoritmos-II-main/utilities] , até o momento isso que está pronto. Gostaria de uma abordagem do algoritmo de branch and bound com uma DFS + MST. Até o momento vamos implementar o Cold-Start, Busca Gulosa e a Heuristica de Insercao baseada em fecho convexo. O twice arround the three e o christofides vao ser implementados posteriormente, se concentre nessas tres primeiras abordagens
+
+--------------------------------------------------------------------------------
+INTERAÇÃO 1 - ASSISTENTE
+--------------------------------------------------------------------------------
+Implementei o algoritmo exato Branch-and-Bound (DFS + MST) junto com a subrotina de MST otimizada e as três primeiras estratégias de inicialização (warm-start): Cold-Start, Busca Gulosa (Vizinho Mais Próximo) e Inserção Baseada em Fecho Convexo.
+
+Arquivos criados e atualizados:
+
+1. utilities/mst.py
+   - mst_custo_subconjunto(...): algoritmo de Prim denso em O(k^2) operando diretamente sobre um subconjunto de vértices com swap-remove e buffers pré-alocados (zero cópias de submatrizes ou alocações por nó da DFS), com aborto antecipado (early-abort) assim que o custo acumulado atinge o orçamento restante.
+   - mst_prim_arestas(...): retorna (custo_total, arestas) da MST (já reaproveitável futuramente para Twice-around-the-tree, Christofides e extração de métricas de grau máximo).
+
+2. algorithms/heuristics.py
+   - cold_start(matriz_distancias): gera a rota trivial 0 -> 1 -> ... -> n-1 -> 0 em O(N).
+   - busca_gulosa_vizinho_mais_proximo(matriz_distancias, inicio=0): heurística Nearest Neighbor em O(N^2).
+   - fecho_convexo_2d(vetor_vertices) + insercao_fecho_convexo(vetor_vertices, matriz_distancias, inicio=0): calcula o fecho convexo 2D via Andrew's Monotone Chain em O(N log N) (tratando pontos colineares e coordenadas duplicadas) e insere iterativamente os vértices internos pelo critério guloso de menor custo marginal Delta(i, k, j) = d(i, k) + d(k, j) - d(i, j), usando lista encadeada cíclica em array e cache incremental da melhor aresta.
+   - obter_warm_start(...), calcular_custo_rota(...) e validar_rota_tsp(...).
+
+3. algorithms/branch_and_bound.py
+   - branch_and_bound_tsp(...) retornando ResultadoBranchAndBound (com .to_dict() pronto para exportar para CSV/Pandas).
+   - DFS in-place: complexidade espacial O(N) na pilha de recursão, sem cópias de vetores ou matrizes por nó; converte a matriz NumPy para lista nativa Python uma única vez para eliminar overhead de indexação escalar.
+   - Limite inferior admissível:
+     - Na raiz (P = [0]): limite 1-tree com as duas menores arestas incidentes a 0 + MST(V \ {0}).
+     - Nos demais nós: LB(P) = custo_atual + min_{u in U} d(atual, u) + min_{u in U} d(u, 0) + MST(U), com poda rápida em dois níveis (antes de chamar Prim) e early-abort dentro do Prim.
+   - Ordenação de filhos e quebra de simetria: visita vizinhos mais próximos primeiro e aplica quebra de simetria de reversão por rank de distância à origem (rank_origem[v_1] < rank_origem[v_{N-1}]) em O(1) via bit_length(), preservando sempre a orientação explorada primeiro pela DFS.
+   - Cache limitado de MST: indexado pela máscara de bits dos vértices não visitados (tamanho_max_cache_mst=65536), mantendo uso de memória estritamente limitado.
+   - Instrumentação e timeout: contabiliza nos_expandidos, nos_podados (segmentados em limite rápido, MST e simetria), folhas_avaliadas, profundidade_maxima, chamadas_mst, acertos_cache_mst, tempo_heuristica_s, tempo_mst_s, tempo_bnb_s, tempo_total_s, pico_memoria_bytes (opcional via medir_memoria=True) e limite_tempo_s=1800.0 (30 min, marcando custo_otimo=None e timeout_atingido=True ao estourar o tempo).
+   - Pronto para extensão: aceita warm_start_customizado ou heuristica_fn para plugar futuramente twice-around-the-tree e christofides sem alterar o núcleo do Branch-and-Bound.
+
+4. requirements.txt e tests/test_branch_and_bound.py
+   - Adicionado numpy ao requirements.txt.
+   - Criados 10 testes unitários cobrindo Prim (com e sem early-abort), casos degenerados do fecho convexo, validação exata contra força bruta para N em [3, 9] nas 3 estratégias, equivalência com/sem quebra de simetria e cache, medição de memória e comportamento de timeout.
+
+Exemplo de uso:
+
+from entities.node import Node
+from utilities.distance import criar_matriz_distancias
+from algorithms.branch_and_bound import branch_and_bound_tsp
+
+vertices = [Node(0, 0), Node(10, 0), Node(10, 10), Node(0, 10), Node(5, 5)]
+matriz = criar_matriz_distancias(vertices)
+
+for estrategia in ("cold_start", "nearest_neighbor", "convex_hull"):
+    res = branch_and_bound_tsp(
+        matriz,
+        estrategia=estrategia,
+        vetor_vertices=vertices,
+        limite_tempo_s=1800.0,
+    )
+    print(res.to_dict())
+
+Validação executada:
+- Testes unitários (python3 -m unittest discover -s tests -v): 10/10 passaram (0.714s).
+- Benchmark rápido em instâncias euclidianas 2D aleatórias:
+  - N=16: ótimo provado em ~0.045s (convex_hull já iniciou no ótimo, reduzindo nós expandidos de 1366 para 1236).
+  - N=18: ótimo provado em ~0.005s (convex_hull reduziu nós expandidos de 154 para 100).
+  - N=22: ótimo provado em ~0.91s (~13.4k nós expandidos, ~148.5k podados, ~79% do tempo na subrotina MST).
+  - N=25 com limite de 15s: interrompido corretamente com custo_otimo=None mantendo ~2.8M de nós avaliados/podados contabilizados.
+
+--------------------------------------------------------------------------------
+INTERAÇÃO 2 - USUÁRIO
+--------------------------------------------------------------------------------
+ok, achei que ficou bem complexo e sinto que o ideal seria refatorar o codigo. Nesse sentido vamos tirar algumas otimizacoes com o objetivo de deixar o codigo com mais fácil entendimento.
+vamos refatorar e enxugar os arquivos `algorithms/branch_and_bound.py`, `algorithms/heuristics.py` e `utilities/mst.py` para deixar o código mais simples, mantendo o algoritmo exato (DFS + Lower Bound por MST + quebra de simetria via `rank_origem` + cache limitado de MST + Prim com swap-remove).
+faça as seguintes simplificações:
+1. Em `algorithms/heuristics.py`, substitua a inserção do Fecho Convexo por uma versão direta O(N^3) usando uma lista Python simples
+2. Em `algorithms/branch_and_bound.py`, remova a estrutura manual `nao_visitados` + `pos_nao_visitado` e os blocos repetidos de restauração LIFO; colete os vértices não visitados em um buffer pré-alocado a partir do vetor `visitado`.
+3. Simplifique a instrumentação removendo contadores redundantes e blocos duplicados (`if perfilar_subrotinas: ... else: ...`), mantendo apenas o que o enunciado pede: `nos_expandidos`, `nos_podados`, `profundidade_maxima`, tempos por subrotina (`warm_start`, `mst`, busca), `timeout` de 30 min com status `NA` e medição opcional de memória (`medir_memoria=False` por padrão).
+4. Enxugue docstrings e validações repetitivas para deixar a implementação concisa preservando 100% da corretude. Ao final, rode testes comparando com um resolvedor exato para garantir que nada quebrou.
+
+--------------------------------------------------------------------------------
+INTERAÇÃO 2 - ASSISTENTE
+--------------------------------------------------------------------------------
+Refatorei e enxuguei os três módulos mantendo integralmente o algoritmo exato (DFS + Lower Bound por MST + quebra de simetria via rank_origem + cache limitado de MST + Prim com swap-remove).
+
+O que foi simplificado:
+
+1. algorithms/heuristics.py
+   - Substituída a lista encadeada com cache incremental em insercao_fecho_convexo por uma implementação direta O(N^3) usando uma lista Python simples (subrota.insert(...) + internos.remove(...)).
+   - Enxugadas docstrings, validações redundantes e o laço de busca_gulosa_vizinho_mais_proximo.
+
+2. algorithms/branch_and_bound.py
+   - Removidas as estruturas manuais nao_visitados + pos_nao_visitado e todos os blocos repetidos de restauração LIFO; agora os vértices não visitados são coletados em um único buffer pré-alocado (buf_nao_visitados) diretamente a partir de visitado, no mesmo laço que calcula as duas arestas mínimas.
+   - Extraída a função interna calcular_mst(qtd, mascara, orcamento) para eliminar duplicação entre a raiz (1-tree) e a DFS e remover os ramos if perfilar_subrotinas: ... else: ....
+   - Simplificado ResultadoBranchAndBound para manter apenas as métricas pedidas no enunciado: nos_expandidos, nos_podados, profundidade_maxima, tempos por subrotina (tempo_warm_start_s, tempo_mst_s, tempo_busca_s, tempo_total_s), status ("OTIMO" / "NA" no timeout de 30 min com custo_otimo=None) e medição opcional de memória (medir_memoria=False).
+
+3. utilities/mst.py
+   - Mantido o Prim denso com swap-remove, buffers pré-alocados e aborto antecipado (orcamento), com código e docstrings mais diretos.
+
+4. tests/test_branch_and_bound.py
+   - Atualizado para os novos campos e expandido com um resolvedor exato Held-Karp (O(N^2 * 2^N)) além da força bruta, validando a corretude exata nas 3 estratégias para N em [3, 9] (força bruta) e N em {10, 12, 14} (Held-Karp).
+
+Validação:
+- Testes unitários (python3 -m unittest discover -s tests -v): 11/11 passaram (1.052s).
+- Sanity benchmark após a refatoração (praticamente o mesmo desempenho anterior):
+  - N=16: 0.0178s com convex_hull (380 nós expandidos vs 768 em cold_start).
+  - N=22: 0.99s (13433 nós expandidos, 148521 podados, status="OTIMO").
+
+--------------------------------------------------------------------------------
+INTERAÇÃO 3 - USUÁRIO
+--------------------------------------------------------------------------------
+Além disso, crie scripts para rodar o branch and bound no cold start e usando a heuristica do fecho convexo por favor, usando o time-limit de 1800 segundos, nao vamos usar a memoria para nao criar um overhead e ficarmos com dados de tempo enviesados.
+
+--------------------------------------------------------------------------------
+INTERAÇÃO 3 - ASSISTENTE
+--------------------------------------------------------------------------------
+Criei o leitor de arquivos TSPLIB e os scripts dedicados para executar o Branch-and-Bound (DFS + MST) com Cold-Start e com a Heurística de Fecho Convexo, configurados com limite_tempo_s = 1800.0 (30 minutos) e medir_memoria = False para evitar qualquer overhead de tracemalloc nas medições de tempo.
+
+Arquivos criados:
+- utilities/tsplib_reader.py: lê arquivos .tsp da TSPLIB (NODE_COORD_SECTION) para objetos Node com nome, arquivo e EDGE_WEIGHT_TYPE.
+- scripts/bnb_runner.py: executor compartilhado que ordena as instâncias por N crescente, executa com medir_memoria=False e limite_tempo_s=1800.0, imprime o progresso em tempo real e grava linha a linha (com flush) em CSV — marcando custo_otimo = NA e status = NA em caso de timeout, preservando nós expandidos, podados, profundidade e tempos por subrotina.
+- scripts/run_bnb_cold_start.py: script para rodar o Branch-and-Bound com Cold-Start (saída padrão: results/bnb_cold_start.csv).
+- scripts/run_bnb_convex_hull.py: script para rodar o Branch-and-Bound com Heurística de Fecho Convexo (saída padrão: results/bnb_convex_hull.csv).
+- tests/test_scripts.py: testes ponta a ponta do leitor TSPLIB, dos dois scripts, da gravação de NA em timeout e da retomada via --continuar.
+
+Como executar:
+
+# Rodar em uma pasta inteira de arquivos .tsp (time-limit padrão: 1800s, memória desativada)
+python3 scripts/run_bnb_cold_start.py caminho/para/instancias/
+python3 scripts/run_bnb_convex_hull.py caminho/para/instancias/
+
+# Rodar em arquivos específicos e escolher o CSV de saída
+python3 scripts/run_bnb_cold_start.py instancia1.tsp instancia2.tsp -o results/cold.csv
+python3 scripts/run_bnb_convex_hull.py instancia1.tsp instancia2.tsp -o results/hull.csv
+
+# Retomar uma execução interrompida pulando instâncias já salvas no CSV
+python3 scripts/run_bnb_convex_hull.py caminho/para/instancias/ --continuar
+
+Validação:
+- Suíte completa (python3 -m unittest discover -s tests -v): 14/14 testes passaram (1.505s), verificando que ambos os scripts encontram o mesmo custo ótimo, respeitam o timeout registrando NA, e executam com medir_memoria=False e time-limit=1800s por padrão.
+
+--------------------------------------------------------------------------------
+INTERAÇÃO 4 - USUÁRIO
+--------------------------------------------------------------------------------
+qual o output dos algortimso no csv? qual a saida
+
+--------------------------------------------------------------------------------
+INTERAÇÃO 4 - ASSISTENTE
+--------------------------------------------------------------------------------
+### 1. CSV do **Branch-and-Bound** ([run_branch_and_bound.py](file:///Users/victorkaizer/.gemini/antigravity/scratch/trabalho-2-algoritmos-2/experiments/run_branch_and_bound.py))
+
+Salvo por padrão em `results/metricas_branch_and_bound.csv` (ou no caminho passado em `--output`, como `results/metricas_bnb_convex_hull.csv`).
+
+**Colunas (21):**
+| Coluna | Significado |
+| :--- | :--- |
+| `instancia` | Nome da instância TSPLIB (ex.: `burma14`) |
+| `n` | Número de vértices $N$ |
+| `tipo_metrica` | Métrica do arquivo (`EUC_2D`, `GEO`, `ATT`, `EXPLICIT`) |
+| `warm_start_strategy` | Estratégia usada (`cold_start`, `nearest_neighbor`, `convex_hull`, `christofides`) |
+| `status` | `OPTIMAL` se terminou no prazo, ou `NA` se atingiu o `time_limit` |
+| `optimal` | `True` ou `False` |
+| `valido` | `True` se o ciclo retornado foi validado como Hamiltoniano com custo exato |
+| `best_cost` | Custo ótimo (ou `NA` quando dá timeout) |
+| `incumbent_cost` | Melhor custo encontrado até o final (mesmo se der timeout) |
+| `initial_upper_bound` | Limite superior inicial (`UB0`) gerado pelo *warm-start* |
+| `root_lower_bound` | Limite inferior (`LB0`) na raiz da árvore (1-árvore) |
+| `gap_inicial_pct` | Gap percentual do *warm-start* em relação ao ótimo (`NA` se der timeout) |
+| `nodes_expanded` | Total de nós expandidos na árvore |
+| `nodes_pruned` | Total de nós podados na árvore |
+| `max_depth` | Profundidade máxima atingida |
+| `elapsed_time` | Tempo total em segundos (warm-start + busca) |
+| `search_time` | Tempo gasto somente na busca B&B (segundos) |
+| `time_warm_start` | Tempo gasto na heurística inicial (segundos) |
+| `time_lower_bound_mst` | Tempo acumulado na subrotina de cálculo da MST / lower bound (segundos) |
+| `time_search_overhead` | Tempo restante da busca fora da MST (segundos) |
+| `peak_memory_bytes` | Pico de memória em bytes (`0` se `--medir-memoria` não estiver ligado) |
+
+**Exemplo de linha real (`burma14`, `convex_hull`):**
+```csv
+instancia,n,tipo_metrica,warm_start_strategy,status,optimal,valido,best_cost,incumbent_cost,initial_upper_bound,root_lower_bound,gap_inicial_pct,nodes_expanded,nodes_pruned,max_depth,elapsed_time,search_time,time_warm_start,time_lower_bound_mst,time_search_overhead,peak_memory_bytes
+burma14,14,GEO,convex_hull,OPTIMAL,True,True,3323,3323,3323,2542,0.0,5918,37557,12,0.1091,0.1090,0.000072,0.0928,0.0162,0
+```
+
+---
+
+### 2. CSV do **Christofides puro** ([run_christofides.py](file:///Users/victorkaizer/.gemini/antigravity/scratch/trabalho-2-algoritmos-2/experiments/run_christofides.py))
+
+Salvo em [metricas_christofides.csv](file:///Users/victorkaizer/.gemini/antigravity/scratch/trabalho-2-algoritmos-2/metricas_christofides.csv).
+
+**Colunas (16):**
+`n`, `custo`, `qtd_vertices_impares`, `tempo_mst_ms`, `mem_pico_mst_kb`, `tempo_matching_ms`, `mem_pico_matching_kb`, `tempo_euleriano_ms`, `mem_pico_euleriano_kb`, `tempo_shortcutting_ms`, `mem_pico_shortcutting_kb`, `tempo_total_ms`, `mem_pico_total_kb`, `instancia`, `tempo_algoritmo_puro_ms`, `tipo_metrica`.
+
+--------------------------------------------------------------------------------
+INTERAÇÃO 5 - USUÁRIO
+--------------------------------------------------------------------------------
+ok me de o comando para rodar o convex_hull no meu mac agora
+
+--------------------------------------------------------------------------------
+INTERAÇÃO 5 - ASSISTENTE
+--------------------------------------------------------------------------------
+
+Copie e cole no terminal do seu Mac:
+
+```bash
+cd /Users/victorkaizer/.gemini/antigravity/scratch/trabalho-2-algoritmos-2 && caffeinate -i python3 experiments/run_branch_and_bound.py --estrategias convex_hull --output results/metricas_bnb_convex_hull.csv
+```
+
+- O `caffeinate -i` impede o Mac de hibernar enquanto o experimento roda.
+- O resultado vai sendo salvo linha a linha em `results/metricas_bnb_convex_hull.csv` (para cada uma das 7 instâncias com coordenadas 2D: `burma14`, `ulysses16`, `ulysses22`, `att48`, `eil51`, `berlin52`, `st70`, com limite de 1800 s por instância).
+- Se precisar pausar (`Ctrl+C`) e continuar depois de onde parou, rode o mesmo comando acrescentando `--resume` no final.
